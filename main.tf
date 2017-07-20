@@ -4,7 +4,7 @@ provider "aws" {
 }
 
 variable "name" {
-	default = "brams_awesome_cluster"
+	default = "brams-cluster"
 }
 
 # VPC
@@ -91,6 +91,13 @@ resource "aws_ecs_service" "main" {
   cluster = "${aws_ecs_cluster.primary.id}"
   task_definition = "${aws_ecs_task_definition.awesome_service.arn}"
   desired_count = 1
+  iam_role = "${aws_iam_role.ecs_alb.id}"
+  
+  load_balancer {
+    target_group_arn = "${aws_alb_target_group.awesome.id}"
+    container_name = "awesome"
+    container_port = "3001"
+  }
 }
 
 # IAM role we need for EC2 running ECS
@@ -112,4 +119,57 @@ resource "aws_iam_instance_profile" "ec2_ecs" {
 resource "aws_iam_role_policy_attachment" "attach_ecs_for_ec2" {
   role       = "${aws_iam_role.ec2_ecs.name}"
   policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role"
+}
+
+# IAM role for the ECS service to interact with ALB
+
+data "template_file" "ecs_assume_role" {
+  template = "${file("${path.module}/templates/ecs-assume-role.json")}"
+}
+
+resource "aws_iam_role" "ecs_alb" {
+  name = "ecs_role_for_service_${var.name}"
+  assume_role_policy = "${data.template_file.ecs_assume_role.rendered}"
+}
+
+resource "aws_iam_role_policy_attachment" "attach_alb_for_ecs" {
+  role       = "${aws_iam_role.ecs_alb.name}"
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceRole"
+}
+
+# Target group for awesome-service
+
+resource "aws_alb_target_group" "awesome" {
+  name     = "${var.name}-awesome-services"
+  port     = 1234 # default port, will not be used
+  protocol = "HTTP"
+  vpc_id   = "${module.vpc.vpc_id}"
+  deregistration_delay = 5
+  
+  health_check {
+    path = "/status"
+  }
+}
+
+# ALB load balancer and listener
+
+resource "aws_alb" "main" {
+  name            = "${var.name}-main-alb"
+  internal        = false
+  security_groups = [
+    "${aws_security_group.allow_3001_inbound.id}",
+    "${module.vpc.default_security_group_id}",
+  ]
+  subnets = ["${module.vpc.public_subnets}"]
+}
+
+resource "aws_alb_listener" "awesome" {
+  load_balancer_arn = "${aws_alb.main.id}"
+  port = "3001"
+  protocol = "HTTP"
+
+  default_action {
+   target_group_arn = "${aws_alb_target_group.awesome.arn}"
+   type = "forward"
+  }
 }
